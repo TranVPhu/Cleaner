@@ -20,6 +20,12 @@ Một số mục (File tạm Windows, Windows Update...) cần quyền Administr
 - **WSL**: thu gọn file `ext4.vhdx` (apt clean + fstrim + `diskpart compact vdisk`) hoặc chuyển distro sang ổ khác (`wsl --manage --move`).
 - **WinSxS**: `DISM /Online /Cleanup-Image /StartComponentCleanup`.
 
+## Tab "RAM & Khởi động"
+
+- **RAM**: % RAM đang dùng (tự cập nhật). *Giải phóng RAM* thu gọn bộ nhớ của mọi tiến trình (`EmptyWorkingSet`, tạm thời); *Xoá bộ nhớ chờ* xoá standby list (cần Admin).
+- **Ứng dụng đang chạy**: gộp theo tên, sắp theo RAM; chọn và *Đóng ứng dụng đã chọn* (buộc tắt cả tiến trình con). Tiến trình của Windows / bị bảo vệ không cho đóng.
+- **Khởi động cùng Windows**: bật/tắt giống tab Startup apps của Task Manager (ghi `StartupApproved`, không xoá mục gốc). Mục "Mọi người dùng" cần Admin.
+
 ## Đóng gói thành .exe
 
 ```

@@ -9,7 +9,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, engine, system
+from . import __version__, engine, memory, system
 from .categories import CATEGORIES
 
 ACCENT = "#1f6feb"
@@ -94,8 +94,13 @@ class App(tk.Tk):
         notebook.add(system_tab, text="  Tối ưu hệ thống  ")
         self.system_panel = SystemPanel(system_tab, self)
         self.system_panel.pack(fill="both", expand=True)
-        notebook.bind("<<NotebookTabChanged>>",
-                      lambda e: notebook.index("current") == 1 and self.system_panel.refresh())
+        memory_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(memory_tab, text="  RAM & Khởi động  ")
+        self.memory_panel = MemoryPanel(memory_tab, self)
+        self.memory_panel.pack(fill="both", expand=True)
+        notebook.bind("<<NotebookTabChanged>>", lambda e: (
+            self.system_panel.refresh() if notebook.index("current") == 1 else
+            self.memory_panel.refresh() if notebook.index("current") == 2 else None))
 
         # Cột trái: danh sách hạng mục (cuộn được)
         left_outer = ttk.Frame(body)
@@ -176,6 +181,7 @@ class App(tk.Tk):
         self.scan_btn.configure(state=state)
         self.clean_btn.configure(state=state)
         self.system_panel.set_busy(busy)
+        self.memory_panel.set_busy(busy)
 
     def run_task(self, label, func, *args):
         """Chạy `func(*args)` ở luồng phụ; kết quả (chuỗi) hiện bằng hộp thoại."""
@@ -203,6 +209,7 @@ class App(tk.Tk):
         self.progress.configure(mode="determinate", value=0)
         self._set_busy(False)
         self.system_panel.refresh()
+        self.memory_panel.refresh()
         if ok:
             if freed > 50 * 2**20:
                 msg += f"\n\nỔ {system.SYSTEM_DRIVE} vừa trống thêm {engine.format_size(freed)}."
@@ -643,6 +650,180 @@ class SystemPanel(ttk.Frame):
                 "Distro sẽ bị tắt trong lúc chuyển. Dữ liệu bên trong được giữ nguyên. "
                 "Có thể mất 5-20 phút."):
             self.app.run_task("Chuyển WSL", system.wsl_move, d, dest)
+
+
+class MemoryPanel(ttk.Frame):
+    """Tab "RAM & Khởi động": tiến trình ngốn RAM, thu gọn bộ nhớ, ứng dụng khởi động."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.buttons = []          # [(button, cần_admin)]
+        self.procs = {}            # iid -> nhóm tiến trình
+        self.startup = []
+
+        # --- Tổng quan RAM
+        head = ttk.Frame(self)
+        head.pack(fill="x", pady=(0, 10))
+        self.ram_label = ttk.Label(head, style="Big.TLabel")
+        self.ram_label.pack(side="left")
+        self.ram_detail = ttk.Label(head, style="Muted.TLabel")
+        self.ram_detail.pack(side="left", padx=12, pady=(8, 0))
+        ttk.Button(head, text="Làm mới", command=self.refresh).pack(side="right")
+        self._button(head, "Xoá bộ nhớ chờ" + ("" if app.admin else " (Admin)"),
+                     self._purge, admin=True, side="right")
+        self._button(head, "Giải phóng RAM", self._trim, admin=False, side="right")
+        self.ram_bar = ttk.Progressbar(self, maximum=100)
+        self.ram_bar.pack(fill="x", pady=(0, 10))
+
+        cols = ttk.Frame(self)
+        cols.pack(fill="both", expand=True)
+        left = ttk.Frame(cols)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        right = ttk.Frame(cols)
+        right.pack(side="left", fill="both", expand=True, padx=(6, 0))
+
+        # --- Tiến trình
+        card = ttk.LabelFrame(left, text="Ứng dụng đang chạy (gộp theo tên)", padding=10)
+        card.pack(fill="both", expand=True)
+        self.proc_tree = self._tree(card, (("name", "Tiến trình", 220, "w"), ("count", "Số", 40, "e"),
+                                           ("ram", "RAM", 90, "e"), ("kind", "Loại", 90, "w")))
+        self.proc_tree.tag_configure("system", foreground="#888")
+        ttk.Label(card, text="RAM = bộ nhớ riêng (như cột Memory của Task Manager). "
+                             "Tiến trình của Windows/bị bảo vệ không cho đóng.",
+                  style="Muted.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(6, 6))
+        row = ttk.Frame(card)
+        row.pack(fill="x")
+        self._button(row, "Đóng ứng dụng đã chọn", self._kill, admin=False)
+
+        # --- Khởi động cùng Windows
+        card = ttk.LabelFrame(right, text="Khởi động cùng Windows", padding=10)
+        card.pack(fill="both", expand=True)
+        self.start_tree = self._tree(card, (("name", "Ứng dụng", 200, "w"),
+                                            ("state", "Trạng thái", 80, "w"),
+                                            ("where", "Phạm vi", 150, "w")))
+        self.start_tree.tag_configure("off", foreground="#888")
+        ttk.Label(card, text="Tắt bớt ứng dụng không cần để máy khởi động nhanh và đỡ tốn RAM. "
+                             "Chỉ tắt tự khởi động, không gỡ ứng dụng; có thể bật lại bất cứ lúc nào. "
+                             "Mục \"Mọi người dùng\" cần quyền Admin.",
+                  style="Muted.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(6, 6))
+        row = ttk.Frame(card)
+        row.pack(fill="x")
+        self._button(row, "Tắt khởi động", lambda: self._set_startup(False), admin=False)
+        self._button(row, "Bật lại", lambda: self._set_startup(True), admin=False)
+
+        self.set_busy(False)
+        self._tick()
+
+    # ------------------------------------------------------------ dựng giao diện
+    def _tree(self, parent, columns):
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(frame, columns=[c[0] for c in columns], show="headings")
+        for col, text, width, anchor in columns:
+            tree.heading(col, text=text)
+            tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
+        sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        return tree
+
+    def _button(self, parent, text, command, admin, side="left"):
+        button = ttk.Button(parent, text=text, command=command)
+        button.pack(side=side, padx=(0, 6) if side == "left" else (6, 0))
+        self.buttons.append((button, admin))
+        return button
+
+    def set_busy(self, busy):
+        for button, needs_admin in self.buttons:
+            disabled = busy or (needs_admin and not self.app.admin)
+            button.configure(state="disabled" if disabled else "normal")
+
+    # ------------------------------------------------------------ dữ liệu
+    def _tick(self):
+        """Cập nhật thanh RAM mỗi 2 giây khi tab đang hiển thị."""
+        if self.winfo_ismapped():
+            self._refresh_ram()
+        self.after(2000, self._tick)
+
+    def _refresh_ram(self):
+        fmt = engine.format_size
+        m = memory.memory_info()
+        self.ram_label.configure(text=f"{m['load']}%")
+        self.ram_detail.configure(text=f"RAM đang dùng {fmt(m['used'])} / {fmt(m['total'])}  ·  "
+                                       f"còn trống {fmt(m['avail'])}")
+        self.ram_bar["value"] = m["load"]
+
+    def refresh(self):
+        self._refresh_ram()
+        fmt = engine.format_size
+
+        selected = set(self.proc_tree.selection())
+        self.proc_tree.delete(*self.proc_tree.get_children())
+        self.procs = {}
+        for g in memory.processes():
+            if g["ram"] < 5 * 2**20:
+                continue
+            iid = g["name"].lower()
+            self.procs[iid] = g
+            self.proc_tree.insert("", "end", iid=iid, tags=("system",) if g["system"] else (),
+                                  values=(g["name"], g["count"], fmt(g["ram"]),
+                                          "Hệ thống" if g["system"] else "Ứng dụng"))
+        self.proc_tree.selection_set([i for i in selected if i in self.procs])
+
+        selected = set(self.start_tree.selection())
+        self.start_tree.delete(*self.start_tree.get_children())
+        self.startup = memory.startup_items()
+        for i, it in enumerate(self.startup):
+            self.start_tree.insert("", "end", iid=str(i), tags=() if it["enabled"] else ("off",),
+                                   values=(it["name"], "Bật" if it["enabled"] else "Đã tắt",
+                                           it["where"]))
+        self.start_tree.selection_set([i for i in selected if self.start_tree.exists(i)])
+
+    # ------------------------------------------------------------ hành động
+    def _trim(self):
+        self.app.run_task("Giải phóng RAM", memory.trim_working_sets)
+
+    def _purge(self):
+        self.app.run_task("Xoá bộ nhớ chờ", memory.purge_standby)
+
+    def _kill(self):
+        groups = [self.procs[i] for i in self.proc_tree.selection() if i in self.procs]
+        if not groups:
+            messagebox.showinfo("Đóng ứng dụng", "Hãy chọn ứng dụng trong danh sách "
+                                                 "(giữ Ctrl để chọn nhiều).")
+            return
+        blocked = [g["name"] for g in groups if g["system"]]
+        if blocked:
+            messagebox.showwarning("Đóng ứng dụng", "Không thể đóng tiến trình của Windows "
+                                                    "hoặc bị bảo vệ:\n  " + ", ".join(blocked))
+            return
+        lines = "\n".join(f"  • {g['name']}  ({engine.format_size(g['ram'])})" for g in groups)
+        if messagebox.askyesno("Đóng ứng dụng",
+                               f"Buộc đóng các ứng dụng sau?\n\n{lines}\n\n"
+                               "Dữ liệu CHƯA LƯU trong các ứng dụng này sẽ bị mất.",
+                               icon="warning"):
+            self.app.run_task("Đóng ứng dụng", memory.kill, groups)
+
+    def _set_startup(self, enabled):
+        items = [self.startup[int(i)] for i in self.start_tree.selection()]
+        if not items:
+            messagebox.showinfo("Khởi động", "Hãy chọn ứng dụng trong danh sách.")
+            return
+        errors = []
+        for it in items:
+            try:
+                memory.set_startup(it, enabled)
+            except RuntimeError as e:
+                errors.append(str(e))
+        self.refresh()
+        if errors:
+            messagebox.showerror("Khởi động", "\n".join(errors))
+        else:
+            self.app.status.configure(
+                text=("Đã bật lại: " if enabled else "Đã tắt khởi động: ")
+                + ", ".join(it["name"] for it in items))
 
 
 def run():
