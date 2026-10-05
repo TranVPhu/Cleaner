@@ -67,6 +67,7 @@ class App(tk.Tk):
         ttk.Label(top, text="Phu_Don_Rac", style="Title.TLabel").pack(side="left")
         ttk.Label(top, text="  Dọn file tạm, cache và thùng rác",
                   style="Muted.TLabel").pack(side="left")
+        ttk.Button(top, text="ⓘ Thông tin", command=self._about).pack(side="right", padx=(8, 0))
         if self.admin:
             ttk.Label(top, text="✔ Đang chạy với quyền Administrator",
                       foreground="#1a7f37").pack(side="right")
@@ -163,6 +164,11 @@ class App(tk.Tk):
         self.scan_btn.pack(side="right", padx=8)
         ttk.Label(buttons, text="Nhấp đúp một dòng để mở thư mục",
                   style="Muted.TLabel").pack(side="left")
+
+    def _about(self):
+        messagebox.showinfo("Thông tin", f"Phu_Don_Rac {__version__}\n\n"
+                                         "Author: Tran Van Phu\n"
+                                         "Release date: 05/10/2026")
 
     def _select(self, value):
         for var in self.vars.values():
@@ -689,11 +695,8 @@ class MemoryPanel(ttk.Frame):
         self.proc_tree = self._tree(card, (("name", "Tiến trình", 220, "w"), ("count", "Số", 40, "e"),
                                            ("ram", "RAM", 90, "e"), ("kind", "Loại", 90, "w")))
         self.proc_tree.tag_configure("system", foreground="#888")
-        ttk.Label(card, text="RAM = bộ nhớ riêng (như cột Memory của Task Manager). "
-                             "Tiến trình của Windows/bị bảo vệ không cho đóng.",
-                  style="Muted.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(6, 6))
         row = ttk.Frame(card)
-        row.pack(fill="x")
+        row.pack(fill="x", pady=(8, 0))
         self._button(row, "Đóng ứng dụng đã chọn", self._kill, admin=False)
 
         # --- Khởi động cùng Windows
@@ -703,12 +706,8 @@ class MemoryPanel(ttk.Frame):
                                             ("state", "Trạng thái", 80, "w"),
                                             ("where", "Phạm vi", 150, "w")))
         self.start_tree.tag_configure("off", foreground="#888")
-        ttk.Label(card, text="Tắt bớt ứng dụng không cần để máy khởi động nhanh và đỡ tốn RAM. "
-                             "Chỉ tắt tự khởi động, không gỡ ứng dụng; có thể bật lại bất cứ lúc nào. "
-                             "Mục \"Mọi người dùng\" cần quyền Admin.",
-                  style="Muted.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(6, 6))
         row = ttk.Frame(card)
-        row.pack(fill="x")
+        row.pack(fill="x", pady=(8, 0))
         self._button(row, "Tắt khởi động", lambda: self._set_startup(False), admin=False)
         self._button(row, "Bật lại", lambda: self._set_startup(True), admin=False)
 
