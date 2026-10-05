@@ -667,6 +667,7 @@ class MemoryPanel(ttk.Frame):
         self.buttons = []          # [(button, cần_admin)]
         self.procs = {}            # iid -> nhóm tiến trình
         self.startup = []
+        self.sorting = {}          # tree -> [cột, đảo ngược, {cột: tiêu đề}, hàm lấy khoá]
 
         # --- Tổng quan RAM
         head = ttk.Frame(self)
@@ -693,7 +694,8 @@ class MemoryPanel(ttk.Frame):
         card = ttk.LabelFrame(left, text="Ứng dụng đang chạy (gộp theo tên)", padding=10)
         card.pack(fill="both", expand=True)
         self.proc_tree = self._tree(card, (("name", "Tiến trình", 220, "w"), ("count", "Số", 40, "e"),
-                                           ("ram", "RAM", 90, "e"), ("kind", "Loại", 90, "w")))
+                                           ("ram", "RAM", 90, "e"), ("kind", "Loại", 90, "w")),
+                                    self._proc_key)
         self.proc_tree.tag_configure("system", foreground="#888")
         row = ttk.Frame(card)
         row.pack(fill="x", pady=(8, 0))
@@ -704,7 +706,8 @@ class MemoryPanel(ttk.Frame):
         card.pack(fill="both", expand=True)
         self.start_tree = self._tree(card, (("name", "Ứng dụng", 200, "w"),
                                             ("state", "Trạng thái", 80, "w"),
-                                            ("where", "Phạm vi", 150, "w")))
+                                            ("where", "Phạm vi", 150, "w")),
+                                    self._startup_key)
         self.start_tree.tag_configure("off", foreground="#888")
         row = ttk.Frame(card)
         row.pack(fill="x", pady=(8, 0))
@@ -715,12 +718,15 @@ class MemoryPanel(ttk.Frame):
         self._tick()
 
     # ------------------------------------------------------------ dựng giao diện
-    def _tree(self, parent, columns):
+    def _tree(self, parent, columns, key):
+        """Bảng có thể sắp xếp: nhấn tiêu đề cột để sắp, nhấn lần nữa để đảo chiều.
+        `key(iid, cột)` trả về giá trị dùng để so sánh."""
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
         tree = ttk.Treeview(frame, columns=[c[0] for c in columns], show="headings")
+        self.sorting[tree] = [None, False, {c[0]: c[1] for c in columns}, key]
         for col, text, width, anchor in columns:
-            tree.heading(col, text=text)
+            tree.heading(col, text=text, command=lambda t=tree, c=col: self._sort_by(t, c))
             tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
         sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=sb.set)
@@ -738,6 +744,35 @@ class MemoryPanel(ttk.Frame):
         for button, needs_admin in self.buttons:
             disabled = busy or (needs_admin and not self.app.admin)
             button.configure(state="disabled" if disabled else "normal")
+
+    def _sort_by(self, tree, col):
+        state = self.sorting[tree]
+        if state[0] == col:
+            state[1] = not state[1]
+        else:
+            # Cột số: lớn trước; cột chữ: A -> Z
+            state[0], state[1] = col, isinstance(state[3](tree.get_children()[0], col), (int, float))                 if tree.get_children() else False
+        self._apply_sort(tree)
+
+    def _apply_sort(self, tree):
+        col, reverse, titles, key = self.sorting[tree]
+        for c, text in titles.items():
+            tree.heading(c, text=text + ((" ▼" if reverse else " ▲") if c == col else ""))
+        if col is None:
+            return
+        items = sorted(tree.get_children(), key=lambda iid: key(iid, col), reverse=reverse)
+        for index, iid in enumerate(items):
+            tree.move(iid, "", index)
+
+    def _proc_key(self, iid, col):
+        g = self.procs[iid]
+        return {"name": g["name"].lower(), "count": g["count"], "ram": g["ram"],
+                "kind": (g["system"], g["name"].lower())}[col]
+
+    def _startup_key(self, iid, col):
+        it = self.startup[int(iid)]
+        return {"name": it["name"].lower(), "state": (not it["enabled"], it["name"].lower()),
+                "where": (it["where"], it["name"].lower())}[col]
 
     # ------------------------------------------------------------ dữ liệu
     def _tick(self):
@@ -769,6 +804,7 @@ class MemoryPanel(ttk.Frame):
             self.proc_tree.insert("", "end", iid=iid, tags=("system",) if g["system"] else (),
                                   values=(g["name"], g["count"], fmt(g["ram"]),
                                           "Hệ thống" if g["system"] else "Ứng dụng"))
+        self._apply_sort(self.proc_tree)
         self.proc_tree.selection_set([i for i in selected if i in self.procs])
 
         selected = set(self.start_tree.selection())
@@ -778,6 +814,7 @@ class MemoryPanel(ttk.Frame):
             self.start_tree.insert("", "end", iid=str(i), tags=() if it["enabled"] else ("off",),
                                    values=(it["name"], "Bật" if it["enabled"] else "Đã tắt",
                                            it["where"]))
+        self._apply_sort(self.start_tree)
         self.start_tree.selection_set([i for i in selected if self.start_tree.exists(i)])
 
     # ------------------------------------------------------------ hành động
