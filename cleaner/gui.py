@@ -6,6 +6,7 @@ import queue
 import shutil
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -35,7 +36,21 @@ class App(tk.Tk):
 
         self._style()
         self._build()
+        self._fit_window()
         self.after(100, self._poll)
+
+    def _fit_window(self):
+        """Cao vừa đủ để tab "Tối ưu hệ thống" không phải cuộn (không vượt quá màn hình)."""
+        self.update_idletasks()
+        scroll = self.system_panel.scroll
+        extra = max(scroll.inner.winfo_reqheight() - scroll.canvas.winfo_reqheight(), 0)
+        width = max(1040, self.winfo_reqwidth())
+        height = max(700, self.winfo_reqheight() + extra + 8)
+        width = min(width, self.winfo_screenwidth() - 40)
+        height = min(height, self.winfo_screenheight() - 80)     # chừa thanh taskbar
+        x = max((self.winfo_screenwidth() - width) // 2, 0)
+        y = max((self.winfo_screenheight() - 80 - height) // 2, 0)
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     def report_callback_exception(self, exc, val, tb):
         """Lỗi trong callback Tk: ghi log và báo, thay vì in ra console vô hình."""
@@ -53,7 +68,7 @@ class App(tk.Tk):
         style = ttk.Style(self)
         if "vista" in style.theme_names():
             style.theme_use("vista")
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 15))
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", 15), foreground=ACCENT)
         style.configure("Big.TLabel", font=("Segoe UI Semibold", 22), foreground=ACCENT)
         style.configure("Muted.TLabel", foreground="#666")
         style.configure("Value.TLabel", font=("Segoe UI Semibold", 11))
@@ -426,24 +441,30 @@ def _shell_execute_runas(exe, params, workdir):
 
 
 class _Scrollable(ttk.Frame):
-    """Khung cuộn dọc; đặt widget con vào `self.inner`."""
+    """Khung cuộn dọc; đặt widget con vào `self.inner`.
+    fill_width=True: nội dung giãn theo bề ngang khung (thay vì khung co theo nội dung)."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, fill_width=False):
         super().__init__(parent)
+        self.fill_width = fill_width
         bg = ttk.Style(self).lookup("TFrame", "background") or "SystemButtonFace"
         self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=bg)
         sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.inner = ttk.Frame(self.canvas)
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.canvas.configure(yscrollcommand=sb.set)
         self.inner.bind("<Configure>", self._on_inner_configure)
+        if fill_width:
+            self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(
+                self.window, width=e.width))
         self.canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         self.bind_all("<MouseWheel>", self._on_wheel, add="+")
 
     def _on_inner_configure(self, _event):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"),
-                              width=self.inner.winfo_reqwidth())
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        if not self.fill_width:
+            self.canvas.configure(width=self.inner.winfo_reqwidth())
 
     def _on_wheel(self, event):
         widget = self.winfo_containing(event.x_root, event.y_root)
@@ -469,12 +490,14 @@ class SystemPanel(ttk.Frame):
                       foreground="#b35900").pack(side="left")
         ttk.Button(head, text="Làm mới", command=self.refresh).pack(side="right")
 
-        cols = ttk.Frame(self)
-        cols.pack(fill="both", expand=True)
+        # Cuộn được: màn hình nhỏ / tỉ lệ phóng to cao vẫn thấy đủ các mục
+        self.scroll = _Scrollable(self, fill_width=True)
+        self.scroll.pack(fill="both", expand=True)
+        cols = self.scroll.inner
         left = ttk.Frame(cols)
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
         right = ttk.Frame(cols)
-        right.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        right.pack(side="left", fill="both", expand=True, padx=(6, 10))
 
         # --- Hibernation
         card = self._card(left, "Ngủ đông - hiberfil.sys")
@@ -503,6 +526,20 @@ class SystemPanel(ttk.Frame):
         self._button(row, "Đặt cố định", lambda: self._pagefile(auto=False), admin=True)
         self._button(row, "Windows tự quản lý", lambda: self._pagefile(auto=True), admin=True)
 
+        # --- Giới hạn RAM WSL
+        card = self._card(left, "Giới hạn RAM cho WSL - Ubuntu + Docker")
+        self.wslmem_label = ttk.Label(card, style="Value.TLabel")
+        self.wslmem_label.pack(anchor="w")
+        self._desc(card, "Ubuntu và Docker Desktop dùng chung một máy ảo WSL (vmmemWSL), "
+                         "mặc định được dùng tới 50% RAM. Có hiệu lực sau khi tắt WSL.")
+        row = ttk.Frame(card)
+        row.pack(anchor="w")
+        self.wslmem_gb = tk.StringVar(value="4")
+        ttk.Spinbox(row, from_=1, to=64, width=4, textvariable=self.wslmem_gb).pack(side="left")
+        ttk.Label(row, text=" GB  ").pack(side="left")
+        self._button(row, "Đặt giới hạn", lambda: self._wsl_memory(limit=True), admin=False)
+        self._button(row, "Bỏ giới hạn", lambda: self._wsl_memory(limit=False), admin=False)
+
         # --- WSL
         card = self._card(right, "Ổ ảo WSL - ext4.vhdx")
         tree_frame = ttk.Frame(card)
@@ -526,9 +563,16 @@ class SystemPanel(ttk.Frame):
 
         # --- WinSxS
         card = self._card(right, "Windows Component Store - WinSxS")
+        self.sxs_label = ttk.Label(card, style="Value.TLabel")
+        self.sxs_label.pack(anchor="w")
+        self.sxs_detail = ttk.Label(card, style="Muted.TLabel", wraplength=440, justify="left")
+        self.sxs_detail.pack(anchor="w")
         self._desc(card, "Xoá bản cũ của các thành phần Windows còn sót sau khi cập nhật "
                          "(DISM /StartComponentCleanup). An toàn, có thể mất 5-15 phút.")
-        self._button(card, "Dọn WinSxS", self._winsxs, admin=True)
+        row = ttk.Frame(card)
+        row.pack(anchor="w")
+        self._button(row, "Phân tích", self._winsxs_analyze, admin=True)
+        self._button(row, "Dọn WinSxS", self._winsxs, admin=True)
 
         self.set_busy(False)
         self.refresh()
@@ -570,6 +614,27 @@ class SystemPanel(ttk.Frame):
             setting = "Hệ thống quản lý"
         self.pf_label.configure(text=f"{fmt(p['size'])}  ·  {setting}  ·  RAM {fmt(p['ram'])}")
 
+        limit = system.wsl_memory_limit()
+        self.wslmem_label.configure(
+            text=f"Đang giới hạn {fmt(limit)}" if limit
+            else f"Không giới hạn (mặc định tối đa {fmt(p['ram'] / 2)})")
+        if limit:
+            self.wslmem_gb.set(str(max(1, round(limit / 2**30))))
+
+        sxs = system.winsxs_info()
+        if sxs:
+            self.sxs_label.configure(text=f"{fmt(sxs['actual'])}  ·  có thể dọn "
+                                          f"{fmt((sxs.get('backups') or 0) + (sxs.get('cache') or 0))}")
+            checked = time.strftime("%d/%m/%Y %H:%M", time.localtime(sxs["checked"]))
+            self.sxs_detail.configure(
+                text=f"Lần dọn gần nhất: {system.format_date(sxs.get('last_cleanup'))}  ·  "
+                     f"Nên dọn: {'Có' if sxs.get('recommended') else 'Không'}  ·  "
+                     f"phân tích lúc {checked}")
+        else:
+            self.sxs_label.configure(text="Chưa phân tích")
+            self.sxs_detail.configure(text="Bấm \"Phân tích\" (cần Admin, mất 1-5 phút) để xem "
+                                           "dung lượng thực và lần dọn gần nhất.")
+
         self.distros = system.wsl_distros()
         self.wsl_tree.delete(*self.wsl_tree.get_children())
         for i, d in enumerate(self.distros):
@@ -606,6 +671,30 @@ class SystemPanel(ttk.Frame):
         if messagebox.askyesno("Bộ nhớ ảo", f"Bộ nhớ ảo sẽ được {what}.\n\n"
                                "Thay đổi có hiệu lực sau khi khởi động lại máy. Tiếp tục?"):
             self.app.run_task("Bộ nhớ ảo", system.set_pagefile, size_mb)
+
+    def _wsl_memory(self, limit):
+        gb = None
+        if limit:
+            try:
+                gb = int(self.wslmem_gb.get())
+            except ValueError:
+                gb = 0
+            if not 1 <= gb <= 64:
+                messagebox.showerror("Giới hạn RAM WSL", "Nhập giới hạn từ 1 đến 64 GB.")
+                return
+        try:
+            msg = system.set_wsl_memory_limit(gb)
+        except RuntimeError as e:
+            messagebox.showerror("Giới hạn RAM WSL", str(e))
+            return
+        self.refresh()
+        if messagebox.askyesno("Giới hạn RAM WSL",
+                               msg + "\n\nTắt WSL ngay để áp dụng?\n"
+                               "Ubuntu và Docker Desktop (cùng các container) sẽ dừng."):
+            self.app.run_task("Tắt WSL", system.wsl_shutdown)
+
+    def _winsxs_analyze(self):
+        self.app.run_task("Phân tích WinSxS", system.winsxs_analyze)
 
     def _winsxs(self):
         if messagebox.askyesno("WinSxS", "Chạy DISM để dọn WinSxS?\n\n"

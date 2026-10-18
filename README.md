@@ -18,7 +18,8 @@ Một số mục (File tạm Windows, Windows Update...) cần quyền Administr
 - **hiberfil.sys**: rút gọn (giữ Fast Startup) / tắt hẳn / bật đầy đủ (`powercfg /h`).
 - **pagefile.sys**: đặt cố định N GB hoặc để Windows tự quản lý (cần khởi động lại).
 - **WSL**: thu gọn file `ext4.vhdx` (apt clean + fstrim + `diskpart compact vdisk`) hoặc chuyển distro sang ổ khác (`wsl --manage --move`).
-- **WinSxS**: `DISM /Online /Cleanup-Image /StartComponentCleanup`.
+- **Giới hạn RAM WSL** (Ubuntu + Docker): ghi `memory=` vào `%USERPROFILE%\.wslconfig`, áp dụng bằng `wsl --shutdown`.
+- **WinSxS**: *Phân tích* (`DISM /AnalyzeComponentStore` — dung lượng thực, lần dọn gần nhất; kết quả lưu ở `%LOCALAPPDATA%\Phu_Don_Rac\winsxs.json`) và *Dọn* (`DISM /Online /Cleanup-Image /StartComponentCleanup`).
 
 ## Tab "RAM & Khởi động"
 

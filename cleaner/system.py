@@ -1,13 +1,16 @@
-"""Tối ưu hệ thống: hiberfil.sys, pagefile.sys, ổ ảo WSL, WinSxS.
+"""Tối ưu hệ thống: hiberfil.sys, pagefile.sys, ổ ảo WSL, giới hạn RAM WSL, WinSxS.
 
 Các hàm `set_*` / `wsl_*` / `winsxs_cleanup` chạy lâu và phần lớn cần quyền Admin;
 chúng ném RuntimeError kèm thông báo khi thất bại.
 """
 
 import ctypes
+import json
 import os
+import re
 import subprocess
 import tempfile
+import time
 import winreg
 
 from .engine import format_size
@@ -192,8 +195,156 @@ def wsl_move(distro: dict, dest_dir: str) -> str:
     return f"Đã chuyển {distro['name']} sang {target}."
 
 
+# ---------------------------------------------------------------- WSL: giới hạn RAM
+
+WSLCONFIG = os.path.join(os.environ.get("USERPROFILE", ""), ".wslconfig")
+_UNITS = {"": 1, "B": 1, "K": 2**10, "KB": 2**10, "M": 2**20, "MB": 2**20,
+          "G": 2**30, "GB": 2**30, "T": 2**40, "TB": 2**40}
+
+
+def _read_wslconfig() -> list:
+    try:
+        with open(WSLCONFIG, encoding="utf-8-sig") as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
+def _wsl2_memory_line(lines):
+    """Chỉ số dòng `memory=` trong mục [wsl2] (hoặc None) và chỉ số dòng [wsl2] (hoặc None)."""
+    section, header = None, None
+    for i, line in enumerate(lines):
+        text = line.strip()
+        if text.startswith("["):
+            section = text.strip("[]").strip().lower()
+            if section == "wsl2":
+                header = i
+        elif section == "wsl2" and re.match(r"memory\s*=", text, re.I):
+            return i, header
+    return None, header
+
+
+def wsl_memory_limit():
+    """Giới hạn RAM của WSL (byte) theo .wslconfig, hoặc None nếu chưa đặt."""
+    lines = _read_wslconfig()
+    i, _ = _wsl2_memory_line(lines)
+    if i is None:
+        return None
+    m = re.match(r"memory\s*=\s*([\d.]+)\s*([KMGT]?B?)\s*$", lines[i].strip(), re.I)
+    if not m:
+        return None
+    return int(float(m.group(1)) * _UNITS[m.group(2).upper()])
+
+
+def set_wsl_memory_limit(gb) -> str:
+    """gb=None: bỏ giới hạn (WSL mặc định dùng tối đa 50% RAM). Giữ nguyên các thiết lập khác."""
+    lines = _read_wslconfig()
+    i, header = _wsl2_memory_line(lines)
+    if gb is None:
+        if i is not None:
+            del lines[i]
+    elif i is not None:
+        lines[i] = f"memory={gb}GB"
+    elif header is not None:
+        lines.insert(header + 1, f"memory={gb}GB")
+    else:
+        lines = (lines + [""] if lines and lines[-1].strip() else lines) + ["[wsl2]", f"memory={gb}GB"]
+    try:
+        with open(WSLCONFIG, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        raise RuntimeError(f"Không ghi được {WSLCONFIG}: {e}") from e
+    what = "đã bỏ giới hạn (mặc định 50% RAM)" if gb is None else f"giới hạn {gb} GB"
+    return f"RAM cho WSL (Ubuntu + Docker): {what}.\nCó hiệu lực sau khi tắt WSL."
+
+
+def wsl_shutdown() -> str:
+    _wsl("--shutdown", timeout=120)
+    return ("Đã tắt WSL - giới hạn RAM mới đã có hiệu lực.\n"
+            "Nếu đang dùng Docker Desktop, hãy mở lại Docker Desktop.")
+
+
 # ---------------------------------------------------------------- WinSxS
 
+_WINSXS_CACHE = os.path.join(os.environ.get("LOCALAPPDATA", "."), "Phu_Don_Rac", "winsxs.json")
+_WINSXS_FIELDS = {
+    "Windows Explorer Reported Size of Component Store": "explorer",
+    "Actual Size of Component Store": "actual",
+    "Backups and Disabled Features": "backups",
+    "Cache and Temporary Data": "cache",
+    "Date of Last Cleanup": "last_cleanup",
+    "Number of Reclaimable Packages": "reclaimable",
+    "Component Store Cleanup Recommended": "recommended",
+}
+
+
+def _parse_size(text):
+    m = re.match(r"([\d.,]+)\s*(bytes|[KMGT]B)", text.strip(), re.I)
+    if not m:
+        return None
+    unit = m.group(2).upper()
+    return int(float(m.group(1).replace(",", "")) * (1 if unit == "BYTES" else _UNITS[unit]))
+
+
+def winsxs_info():
+    """Kết quả phân tích WinSxS gần nhất (lưu từ lần chạy trước), hoặc None."""
+    try:
+        with open(_WINSXS_CACHE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def winsxs_analyze() -> str:
+    """DISM /AnalyzeComponentStore (cần Admin, mất 1-5 phút); lưu kết quả để hiển thị."""
+    out = _run(["dism.exe", "/English", "/Online", "/Cleanup-Image", "/AnalyzeComponentStore"],
+               timeout=3600)
+    info = {"checked": time.time()}
+    for line in out.splitlines():
+        key, sep, value = line.partition(":")
+        field = _WINSXS_FIELDS.get(key.strip())
+        if not sep or not field:
+            continue
+        value = value.strip()
+        if field in ("explorer", "actual", "backups", "cache"):
+            info[field] = _parse_size(value)
+        elif field == "reclaimable":
+            info[field] = int(value) if value.isdigit() else None
+        elif field == "recommended":
+            info[field] = value.lower() == "yes"
+        else:
+            info[field] = value
+    if info.get("actual") is None:
+        raise RuntimeError("Không đọc được kết quả của DISM:\n" + out[-1500:])
+    os.makedirs(os.path.dirname(_WINSXS_CACHE), exist_ok=True)
+    with open(_WINSXS_CACHE, "w", encoding="utf-8") as f:
+        json.dump(info, f)
+    return (f"Dung lượng thực của WinSxS: {format_size(info['actual'])}\n"
+            f"Có thể dọn: {format_size((info.get('backups') or 0) + (info.get('cache') or 0))}"
+            f"  ({info.get('reclaimable') or 0} gói cũ)\n"
+            f"Lần dọn gần nhất: {format_date(info.get('last_cleanup'))}\n"
+            f"Nên dọn: {'Có' if info.get('recommended') else 'Không'}")
+
+
+def format_date(value) -> str:
+    """'2026-09-15 11:01:05' -> '15/09/2026 11:01'."""
+    try:
+        return time.strftime("%d/%m/%Y %H:%M", time.strptime(value, "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError):
+        return value or "Chưa rõ"
+
+
 def winsxs_cleanup() -> str:
+    before = (winsxs_info() or {}).get("actual")
     _run(["dism.exe", "/Online", "/Cleanup-Image", "/StartComponentCleanup"], timeout=7200)
-    return "Đã dọn WinSxS (Component Store)."
+    msg = "Đã dọn WinSxS (Component Store)."
+    try:
+        winsxs_analyze()
+    except RuntimeError:
+        return msg
+    after = winsxs_info()["actual"]
+    if before:
+        msg += f"\n{format_size(before)} → {format_size(after)} (giảm {format_size(max(before - after, 0))})."
+    else:
+        msg += f"\nDung lượng hiện tại: {format_size(after)}."
+    return msg
