@@ -210,20 +210,30 @@ class App(tk.Tk):
         self.memory_panel.set_busy(busy)
         self.optimizer_panel.set_busy(busy)
 
-    def run_task(self, label, func, *args):
-        """Chạy `func(*args)` ở luồng phụ; kết quả (chuỗi) hiện bằng hộp thoại."""
+    def run_task(self, label, func, *args, steps=False):
+        """Chạy `func(*args)` ở luồng phụ; kết quả (chuỗi) hiện bằng hộp thoại.
+        steps=True: `func` nhận thêm `progress(đã_xong, tổng, mô_tả)` và thanh tiến trình hiện %."""
         if self.busy:
             return
         self._set_busy(True)
-        self.progress.configure(mode="indeterminate")
-        self.progress.start(15)
-        self.status.configure(text=label + "…")
+        if steps:
+            self.progress.configure(mode="determinate", value=0)
+        else:
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(15)
+        self.status.configure(text=label + ("… 0%" if steps else "…"))
         drive = system.SYSTEM_DRIVE + "\\"
         free_before = shutil.disk_usage(drive).free
 
+        def report(done, total, text=""):
+            frac = done / total if total else 1.0
+            self.queue.put(("progress", frac,
+                            f"{label}: {text} ({int(frac * 100)}%)" if text
+                            else f"{label}… {int(frac * 100)}%"))
+
         def work():
             try:
-                ok, msg = True, func(*args)
+                ok, msg = True, func(*args, progress=report) if steps else func(*args)
             except Exception as e:      # báo mọi lỗi lên giao diện
                 ok, msg = False, str(e)
             freed = shutil.disk_usage(drive).free - free_before
@@ -233,7 +243,7 @@ class App(tk.Tk):
 
     def _on_task_done(self, ok, label, msg, freed):
         self.progress.stop()
-        self.progress.configure(mode="determinate", value=0)
+        self.progress.configure(mode="determinate", value=1.0 if ok else 0)    # 100% khi xong
         self._set_busy(False)
         self.system_panel.refresh()
         self.memory_panel.refresh()
@@ -1106,7 +1116,7 @@ class OptimizerPanel(ttk.Frame):
         if messagebox.askyesno("Tối ưu Windows 11",
                                f"Áp dụng {len(tweaks)} tinh chỉnh và tắt {len(services)} dịch vụ?\n\n"
                                "Nên tạo điểm khôi phục trước."):
-            self.app.run_task("Tối ưu Windows 11", optimizer.apply, tweaks, services)
+            self.app.run_task("Tối ưu Windows 11", optimizer.apply, tweaks, services, steps=True)
 
     def _revert(self):
         tweaks, services = self._selected("tweak"), self._selected("service")
@@ -1117,7 +1127,7 @@ class OptimizerPanel(ttk.Frame):
                                f"Khôi phục {len(tweaks)} tinh chỉnh và {len(services)} dịch vụ đang "
                                "được tick về mặc định của Windows?\n\n"
                                "(Bỏ tick những mục bạn muốn giữ nguyên.)"):
-            self.app.run_task("Khôi phục mặc định", optimizer.revert, tweaks, services)
+            self.app.run_task("Khôi phục mặc định", optimizer.revert, tweaks, services, steps=True)
 
     def _remove_apps(self):
         pkgs = self._selected("app")
@@ -1126,7 +1136,7 @@ class OptimizerPanel(ttk.Frame):
             return
         if messagebox.askyesno("Gỡ ứng dụng", f"Gỡ {len(pkgs)} ứng dụng đã chọn khỏi mọi tài khoản?",
                                icon="warning"):
-            self.app.run_task("Gỡ ứng dụng", optimizer.remove_apps, pkgs)
+            self.app.run_task("Gỡ ứng dụng", optimizer.remove_apps, pkgs, steps=True)
 
     def _restore_point(self):
         self.app.run_task("Tạo điểm khôi phục", optimizer.create_restore_point)

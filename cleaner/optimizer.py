@@ -235,6 +235,18 @@ def _set_tweak(tweak, apply):
     return None, note
 
 
+class _Steps:
+    """Báo tiến độ: gọi `step(mô_tả)` ngay trước mỗi bước; hoàn tất khi hết `total` bước."""
+
+    def __init__(self, total, progress):
+        self.total, self.progress, self.done = total, progress, 0
+
+    def __call__(self, text):
+        if self.progress:
+            self.progress(self.done, self.total, text)
+        self.done += 1
+
+
 def create_restore_point() -> str:
     """Tạo điểm khôi phục (tạm bỏ giới hạn 1 điểm/24 giờ) và kiểm tra là thật sự có điểm mới."""
     _powershell(r"""
@@ -256,9 +268,11 @@ try {
     return "Đã tạo điểm khôi phục 'Phu_Don_Rac_Backup'."
 
 
-def apply(tweak_ids, service_names) -> str:
+def apply(tweak_ids, service_names, progress=None) -> str:
     errors, notes, t, s = [], [], 0, 0
+    step = _Steps(len(tweak_ids) + len(service_names), progress)
     for tid in tweak_ids:
+        step(_TWEAKS[tid].label.split(" (")[0].split(" - ")[0])
         err, note = _set_tweak(_TWEAKS[tid], True)
         if err:
             errors.append(err)
@@ -267,6 +281,7 @@ def apply(tweak_ids, service_names) -> str:
         if note and note not in notes:
             notes.append(note)
     for name in service_names:
+        step(name)
         try:
             _service_set(name, "disabled")
             s += 1
@@ -277,9 +292,11 @@ def apply(tweak_ids, service_names) -> str:
     return _summary(f"Đã áp dụng {t} tinh chỉnh, tắt {s} dịch vụ.", errors, notes)
 
 
-def revert(tweak_ids, service_names) -> str:
+def revert(tweak_ids, service_names, progress=None) -> str:
     errors, notes, t, s = [], [], 0, 0
+    step = _Steps(len(tweak_ids) + len(service_names), progress)
     for tid in tweak_ids:
+        step(_TWEAKS[tid].label.split(" (")[0].split(" - ")[0])
         err, note = _set_tweak(_TWEAKS[tid], False)
         if err:
             errors.append(err)
@@ -288,6 +305,7 @@ def revert(tweak_ids, service_names) -> str:
         if note and note not in notes:
             notes.append(note)
     for name in service_names:
+        step(name)
         try:
             _service_set(name, _SERVICES[name].start)
             s += 1
@@ -298,11 +316,15 @@ def revert(tweak_ids, service_names) -> str:
     return _summary(f"Đã khôi phục {t} tinh chỉnh, {s} dịch vụ về mặc định Windows.", errors, notes)
 
 
-def remove_apps(packages) -> str:
+def remove_apps(packages, progress=None) -> str:
+    if progress:
+        progress(0, 1, "Đang kiểm tra ứng dụng đã cài")
     before = installed_apps()
     todo = [p for p in packages if _is_installed(p, before)]
     skipped = len(packages) - len(todo)
+    step = _Steps(len(todo), progress)
     for p in todo:
+        step(p)
         try:
             _powershell(
                 f'Get-AppxPackage -AllUsers "*{p}*" | Remove-AppxPackage -AllUsers '
