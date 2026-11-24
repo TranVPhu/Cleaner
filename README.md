@@ -27,6 +27,14 @@ Một số mục (File tạm Windows, Windows Update...) cần quyền Administr
 - **Ứng dụng đang chạy**: gộp theo tên, sắp theo RAM; chọn và *Đóng ứng dụng đã chọn* (buộc tắt cả tiến trình con). Tiến trình của Windows / bị bảo vệ không cho đóng.
 - **Khởi động cùng Windows**: bật/tắt giống tab Startup apps của Task Manager (ghi `StartupApproved`, không xoá mục gốc). Mục "Mọi người dùng" cần Admin.
 
+## Tab "Tối ưu Windows 11"
+
+- **Tinh chỉnh**: ứng dụng nền, Widgets, telemetry, hiệu ứng trong suốt, Bing trong Start, quảng cáo/gợi ý, Game Bar. Ghi registry trực tiếp; mỗi mục có giá trị khôi phục riêng và hiển thị trạng thái hiện tại (✔ đã áp dụng / chưa áp dụng).
+- **Dịch vụ ít dùng**: tắt (Disabled) / khôi phục đúng kiểu khởi động mặc định của Windows (`sc.exe config`).
+- **Gỡ ứng dụng cài sẵn**: chỉ gỡ ứng dụng có trên máy, kiểm tra lại sau khi gỡ; ứng dụng không có trên máy bị làm mờ.
+- **Tạo điểm khôi phục** (bỏ giới hạn 1 điểm/24 giờ và kiểm tra điểm mới có thật) và **Khởi động lại Explorer** (một số tinh chỉnh cần).
+- Lưu ý: bản Windows Home không tắt hẳn được telemetry (mức tối thiểu), tinh chỉnh "ứng dụng nền" có thể làm mất thông báo của app Store.
+
 ## Đóng gói thành .exe
 
 ```

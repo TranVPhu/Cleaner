@@ -10,7 +10,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, engine, memory, system
+from . import __version__, engine, memory, optimizer, system
 from .categories import CATEGORIES
 
 ACCENT = "#1f6feb"
@@ -114,9 +114,14 @@ class App(tk.Tk):
         notebook.add(memory_tab, text="  RAM & Khởi động  ")
         self.memory_panel = MemoryPanel(memory_tab, self)
         self.memory_panel.pack(fill="both", expand=True)
+        opt_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(opt_tab, text="  Tối ưu Windows 11  ")
+        self.optimizer_panel = OptimizerPanel(opt_tab, self)
+        self.optimizer_panel.pack(fill="both", expand=True)
         notebook.bind("<<NotebookTabChanged>>", lambda e: (
             self.system_panel.refresh() if notebook.index("current") == 1 else
-            self.memory_panel.refresh() if notebook.index("current") == 2 else None))
+            self.memory_panel.refresh() if notebook.index("current") == 2 else
+            self.optimizer_panel.refresh() if notebook.index("current") == 3 else None))
 
         # Cột trái: danh sách hạng mục (cuộn được)
         left_outer = ttk.Frame(body)
@@ -203,6 +208,7 @@ class App(tk.Tk):
         self.clean_btn.configure(state=state)
         self.system_panel.set_busy(busy)
         self.memory_panel.set_busy(busy)
+        self.optimizer_panel.set_busy(busy)
 
     def run_task(self, label, func, *args):
         """Chạy `func(*args)` ở luồng phụ; kết quả (chuỗi) hiện bằng hộp thoại."""
@@ -231,6 +237,7 @@ class App(tk.Tk):
         self._set_busy(False)
         self.system_panel.refresh()
         self.memory_panel.refresh()
+        self.optimizer_panel.refresh()
         if ok:
             if freed > 50 * 2**20:
                 msg += f"\n\nỔ {system.SYSTEM_DRIVE} vừa trống thêm {engine.format_size(freed)}."
@@ -320,6 +327,9 @@ class App(tk.Tk):
         self.progress["value"] = value
         if text:
             self.status.configure(text=text)
+
+    def _on_optimizer_status(self, info):
+        self.optimizer_panel.show_status(info)
 
     def _on_scanned(self, res):
         self.results[res.category.id] = res
@@ -949,6 +959,182 @@ class MemoryPanel(ttk.Frame):
             self.app.status.configure(
                 text=("Đã bật lại: " if enabled else "Đã tắt khởi động: ")
                 + ", ".join(it["name"] for it in items))
+
+
+class OptimizerPanel(ttk.Frame):
+    """Tab "Tối ưu Windows 11": tinh chỉnh registry, dịch vụ nền, gỡ ứng dụng cài sẵn."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.tweak_vars, self.app_vars, self.service_vars = {}, {}, {}
+        self.widgets = {}          # (nhóm, khoá) -> (checkbutton, nhãn gốc, mặc định)
+        self.buttons = []          # [(button, cần_admin)]
+        self.loading = False
+
+        head = ttk.Frame(self)
+        head.pack(fill="x", pady=(0, 8))
+        if not app.admin:
+            ttk.Label(head, text="Cần quyền Admin - bấm \"Chạy với quyền Admin\" ở góc trên.",
+                      foreground="#b35900").pack(side="left")
+        self._button(head, "Làm mới", self.refresh, admin=False, side="right")
+        self._button(head, "Khởi động lại Explorer", self._restart_explorer, admin=False, side="right")
+        self._button(head, "Tạo điểm khôi phục", self._restore_point, admin=True, side="right")
+
+        cols = ttk.Frame(self)
+        cols.pack(fill="both", expand=True)
+        left = ttk.Frame(cols)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        right = ttk.Frame(cols)
+        right.pack(side="left", fill="both", expand=True, padx=(6, 0))
+
+        card = ttk.LabelFrame(left, text="Tinh chỉnh hệ thống", padding=10)
+        card.pack(fill="x", pady=(0, 10))
+        for t in optimizer.TWEAKS:
+            self._check(card, "tweak", self.tweak_vars, t.id, t.label, t.default)
+
+        card = ttk.LabelFrame(left, text="Tắt dịch vụ ít dùng", padding=10)
+        card.pack(fill="x", pady=(0, 10))
+        for s in optimizer.SERVICES:
+            self._check(card, "service", self.service_vars, s.name, s.label, s.default)
+
+        row = ttk.Frame(left)
+        row.pack(fill="x")
+        self._button(row, "Áp dụng mục đã chọn", self._apply, admin=True)
+        self._button(row, "Khôi phục mục đã chọn về mặc định", self._revert, admin=True)
+        ttk.Label(left, text="Hai nút trên áp dụng cho cả tinh chỉnh và dịch vụ đang được tick.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+
+        card = ttk.LabelFrame(right, text="Gỡ ứng dụng cài sẵn", padding=10)
+        card.pack(fill="both", expand=True)
+        row = ttk.Frame(card)
+        row.pack(fill="x", pady=(0, 4))
+        ttk.Button(row, text="Chọn tất cả",
+                   command=lambda: self._toggle("app", True)).pack(side="left")
+        ttk.Button(row, text="Bỏ chọn",
+                   command=lambda: self._toggle("app", False)).pack(side="left", padx=4)
+        scroll = _Scrollable(card, fill_width=True)
+        scroll.pack(fill="both", expand=True)
+        for pkg, label, default in optimizer.APPS:
+            self._check(scroll.inner, "app", self.app_vars, pkg, label, default)
+        row = ttk.Frame(card)
+        row.pack(fill="x", pady=(8, 0))
+        self._button(row, "Gỡ ứng dụng đã chọn", self._remove_apps, admin=True)
+
+        self.set_busy(False)
+
+    def _button(self, parent, text, command, admin, side="left"):
+        button = ttk.Button(parent, text=text, command=command)
+        button.pack(side=side, padx=(0, 6) if side == "left" else (6, 0))
+        self.buttons.append((button, admin))
+        return button
+
+    def _check(self, parent, group, store, key, label, default):
+        store[key] = tk.BooleanVar(value=default)
+        cb = ttk.Checkbutton(parent, text=label, variable=store[key])
+        cb.pack(anchor="w", pady=2)
+        self.widgets[(group, key)] = (cb, label, default)
+
+    def _vars(self, group):
+        return {"tweak": self.tweak_vars, "service": self.service_vars, "app": self.app_vars}[group]
+
+    def _toggle(self, group, value):
+        for key, var in self._vars(group).items():
+            if str(self.widgets[(group, key)][0].cget("state")) != "disabled":
+                var.set(value)
+
+    def set_busy(self, busy):
+        for button, needs_admin in self.buttons:
+            disabled = busy or (needs_admin and not self.app.admin)
+            button.configure(state="disabled" if disabled else "normal")
+
+    def _selected(self, group):
+        return [k for k, v in self._vars(group).items() if v.get()]
+
+    # ------------------------------------------------------------ trạng thái hiện tại
+    def refresh(self):
+        if self.loading:
+            return
+        self.loading = True
+
+        def work():
+            try:
+                info = optimizer.status()
+            except Exception:
+                info = None
+            self.app.queue.put(("optimizer_status", info))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_status(self, info):
+        self.loading = False
+        if not info:
+            return
+        for tid, applied in info["tweaks"].items():
+            self._label("tweak", tid, "✔ đã áp dụng" if applied else "chưa áp dụng")
+        names = {"disabled": "đang tắt", "auto": "đang bật (Tự động)",
+                 "delayed-auto": "đang bật (Tự động, trễ)", "demand": "đang bật (Thủ công)"}
+        for name, start in info["services"].items():
+            if start is None:
+                self._absent("service", name)
+            else:
+                self._label("service", name, names[start])
+        for pkg, present in (info["apps"] or {}).items():
+            if present:
+                self._label("app", pkg, "đã cài")
+            else:
+                self._absent("app", pkg)
+
+    def _label(self, group, key, status):
+        cb, label, default = self.widgets[(group, key)]
+        if str(cb.cget("state")) == "disabled":          # trước đó bị làm mờ vì không có trên máy
+            cb.configure(state="normal")
+            self._vars(group)[key].set(default)
+        cb.configure(text=f"{label}  —  {status}")
+
+    def _absent(self, group, key):
+        cb, label, _ = self.widgets[(group, key)]
+        cb.configure(text=f"{label}  —  không có trên máy", state="disabled")
+        self._vars(group)[key].set(False)
+
+    # ------------------------------------------------------------ hành động
+    def _apply(self):
+        tweaks, services = self._selected("tweak"), self._selected("service")
+        if not tweaks and not services:
+            messagebox.showinfo("Tối ưu Windows 11", "Hãy chọn ít nhất một mục.")
+            return
+        if messagebox.askyesno("Tối ưu Windows 11",
+                               f"Áp dụng {len(tweaks)} tinh chỉnh và tắt {len(services)} dịch vụ?\n\n"
+                               "Nên tạo điểm khôi phục trước."):
+            self.app.run_task("Tối ưu Windows 11", optimizer.apply, tweaks, services)
+
+    def _revert(self):
+        tweaks, services = self._selected("tweak"), self._selected("service")
+        if not tweaks and not services:
+            messagebox.showinfo("Tối ưu Windows 11", "Hãy tick các mục cần khôi phục.")
+            return
+        if messagebox.askyesno("Khôi phục mặc định",
+                               f"Khôi phục {len(tweaks)} tinh chỉnh và {len(services)} dịch vụ đang "
+                               "được tick về mặc định của Windows?\n\n"
+                               "(Bỏ tick những mục bạn muốn giữ nguyên.)"):
+            self.app.run_task("Khôi phục mặc định", optimizer.revert, tweaks, services)
+
+    def _remove_apps(self):
+        pkgs = self._selected("app")
+        if not pkgs:
+            messagebox.showinfo("Gỡ ứng dụng", "Hãy chọn ít nhất một ứng dụng.")
+            return
+        if messagebox.askyesno("Gỡ ứng dụng", f"Gỡ {len(pkgs)} ứng dụng đã chọn khỏi mọi tài khoản?",
+                               icon="warning"):
+            self.app.run_task("Gỡ ứng dụng", optimizer.remove_apps, pkgs)
+
+    def _restore_point(self):
+        self.app.run_task("Tạo điểm khôi phục", optimizer.create_restore_point)
+
+    def _restart_explorer(self):
+        if messagebox.askyesno("Explorer", "Khởi động lại Explorer?\n\n"
+                               "Thanh tác vụ và cửa sổ thư mục sẽ nhấp nháy vài giây."):
+            self.app.run_task("Khởi động lại Explorer", optimizer.restart_explorer)
 
 
 def run():
